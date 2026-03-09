@@ -1,34 +1,69 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
+import CommandInputPanel from '../components/home/CommandInputPanel.vue';
+import HistoryPanel from '../components/home/HistoryPanel.vue';
+import SyncStatusBadge from '../components/home/SyncStatusBadge.vue';
+import TabsBar from '../components/home/TabsBar.vue';
+import { clearStoredAuth, getStoredToken, getStoredUser, login, logout, me, register } from '../services/auth';
 import { buildCommandSuggestions, executeCommandPrompt, getAvailableCommands } from '../services/commands';
+import { fetchWorkspace, saveWorkspace } from '../services/workspace';
+import type { AuthUser } from '../types/auth';
 import type { ConsoleTab } from '../types/console';
 
-const tabs = ref<ConsoleTab[]>([
-    {
-        id: crypto.randomUUID(),
-        name: 'Main',
-        entries: [
-            {
-                id: crypto.randomUUID(),
-                command: 'help list',
-                response: 'Available commands in list group: list:random, list:unique, list:filter, list:sort',
-                status: 'info',
-                timestamp: new Date().toISOString(),
-            },
-        ],
-    },
-]);
+type HistoryPanelExposed = {
+    scrollToBottom: () => void;
+};
+
+type CommandInputPanelExposed = {
+    autoResize: () => void;
+    moveCursorToEnd: () => void;
+};
+
+function createDefaultTabs(): ConsoleTab[] {
+    return [
+        {
+            id: crypto.randomUUID(),
+            name: 'Main',
+            entries: [
+                {
+                    id: crypto.randomUUID(),
+                    command: 'help list',
+                    response: 'Available commands in list group: list:random, list:unique, list:filter, list:sort',
+                    status: 'info',
+                    timestamp: new Date().toISOString(),
+                },
+            ],
+        },
+    ];
+}
+
+const tabs = ref<ConsoleTab[]>(createDefaultTabs());
 
 const activeTabId = ref(tabs.value[0].id);
 const commandInput = ref('');
-const commandInputRef = ref<HTMLTextAreaElement | null>(null);
+const commandInputPanelRef = ref<CommandInputPanelExposed | null>(null);
 const commandHistoryIndex = ref<number | null>(null);
 const commandHistoryDraft = ref('');
-const historyContainerRef = ref<HTMLElement | null>(null);
+const historyPanelRef = ref<HistoryPanelExposed | null>(null);
 const editingTabId = ref<string | null>(null);
 const editingTabName = ref('');
 const copiedKey = ref<string | null>(null);
+const isOnline = ref(navigator.onLine);
+const isSyncing = ref(false);
+const syncPulseTimeout = ref<ReturnType<typeof setTimeout> | null>(null);
+const authToken = ref<string | null>(getStoredToken());
+const authUser = ref<AuthUser | null>(getStoredUser());
+const authMode = ref<'login' | 'register'>('login');
+const authName = ref('');
+const authEmail = ref('');
+const authPassword = ref('');
+const authPasswordConfirmation = ref('');
+const authError = ref<string | null>(null);
+const authLoading = ref(false);
+const syncError = ref<string | null>(null);
+const hasLoadedWorkspace = ref(false);
+const saveWorkspaceTimeout = ref<ReturnType<typeof setTimeout> | null>(null);
 const commandDefinitions = getAvailableCommands();
 const tabVariables = ref<Record<string, Record<string, string>>>({
     [tabs.value[0].id]: {},
@@ -36,6 +71,43 @@ const tabVariables = ref<Record<string, Record<string, string>>>({
 
 const activeTab = computed(() => tabs.value.find((tab) => tab.id === activeTabId.value) ?? tabs.value[0]);
 const activeVariables = computed(() => tabVariables.value[activeTabId.value] ?? {});
+const isAuthenticated = computed(() => authUser.value !== null && authToken.value !== null);
+
+function triggerSyncPulse(duration = 700): void {
+    if (!isOnline.value) {
+        isSyncing.value = false;
+        return;
+    }
+
+    isSyncing.value = true;
+
+    if (syncPulseTimeout.value) {
+        clearTimeout(syncPulseTimeout.value);
+    }
+
+    syncPulseTimeout.value = setTimeout(() => {
+        isSyncing.value = false;
+        syncPulseTimeout.value = null;
+    }, duration);
+}
+
+function updateOnlineStatus(): void {
+    const wasOffline = !isOnline.value;
+    isOnline.value = navigator.onLine;
+
+    if (!isOnline.value) {
+        isSyncing.value = false;
+        if (syncPulseTimeout.value) {
+            clearTimeout(syncPulseTimeout.value);
+            syncPulseTimeout.value = null;
+        }
+        return;
+    }
+
+    if (wasOffline && isOnline.value) {
+        triggerSyncPulse(1000);
+    }
+}
 
 const tabSuggestions = computed(() => buildCommandSuggestions(commandDefinitions));
 
@@ -49,6 +121,8 @@ function addTab(): void {
     tabs.value.push(nextTab);
     tabVariables.value[nextTab.id] = {};
     activeTabId.value = nextTab.id;
+
+    scheduleWorkspaceSave();
 }
 
 function removeTab(tabId: string): void {
@@ -62,6 +136,8 @@ function removeTab(tabId: string): void {
     if (activeTabId.value === tabId) {
         activeTabId.value = tabs.value[0].id;
     }
+
+    scheduleWorkspaceSave();
 }
 
 function clearActiveTabHistory(): void {
@@ -72,6 +148,8 @@ function clearActiveTabHistory(): void {
     activeTab.value.entries = [];
     commandHistoryIndex.value = null;
     commandHistoryDraft.value = '';
+
+    scheduleWorkspaceSave();
 }
 
 function removeEntry(entryId: string): void {
@@ -83,6 +161,8 @@ function removeEntry(entryId: string): void {
 
     commandHistoryIndex.value = null;
     commandHistoryDraft.value = '';
+
+    scheduleWorkspaceSave();
 }
 
 function startTabRename(tab: ConsoleTab): void {
@@ -116,6 +196,7 @@ function saveTabRename(tabId: string): void {
     });
 
     cancelTabRename();
+    scheduleWorkspaceSave();
 }
 
 function cancelTabRename(): void {
@@ -147,6 +228,10 @@ function submitCommand(): void {
         timestamp: new Date().toISOString(),
     });
 
+    if (isOnline.value) {
+        triggerSyncPulse();
+    }
+
     commandInput.value = '';
     commandHistoryIndex.value = null;
     commandHistoryDraft.value = '';
@@ -155,6 +240,8 @@ function submitCommand(): void {
         autoResizeCommandInput();
         scrollHistoryToBottom();
     });
+
+    scheduleWorkspaceSave();
 }
 
 function handleCommandInputKeydown(event: KeyboardEvent): void {
@@ -239,38 +326,22 @@ function handleCommandInputKeydown(event: KeyboardEvent): void {
 }
 
 function moveCursorToInputEnd(): void {
-    if (!commandInputRef.value) {
-        return;
-    }
-
-    const position = commandInputRef.value.value.length;
-    commandInputRef.value.selectionStart = position;
-    commandInputRef.value.selectionEnd = position;
+    commandInputPanelRef.value?.moveCursorToEnd();
 }
 
 function autoResizeCommandInput(): void {
-    if (!commandInputRef.value) {
-        return;
-    }
-
-    commandInputRef.value.style.height = 'auto';
-    commandInputRef.value.style.height = `${commandInputRef.value.scrollHeight}px`;
+    commandInputPanelRef.value?.autoResize();
 }
 
 function scrollHistoryToBottom(): void {
-    if (!historyContainerRef.value) {
-        return;
-    }
+    historyPanelRef.value?.scrollToBottom();
+}
 
-    const target = historyContainerRef.value;
+function selectSuggestion(value: string): void {
+    commandInput.value = value;
 
-    target.scrollTop = target.scrollHeight;
-
-    const lastRow = target.querySelector('article:last-of-type');
-    lastRow?.scrollIntoView({ block: 'end' });
-
-    requestAnimationFrame(() => {
-        target.scrollTop = target.scrollHeight;
+    nextTick(() => {
+        moveCursorToInputEnd();
     });
 }
 
@@ -285,15 +356,160 @@ async function copyText(value: string, key: string): Promise<void> {
     }, 1200);
 }
 
-watch(commandInput, () => {
-    nextTick(() => {
-        autoResizeCommandInput();
-    });
-});
+async function submitAuth(): Promise<void> {
+    authError.value = null;
+    authLoading.value = true;
+
+    try {
+        if (authMode.value === 'register') {
+            const response = await register({
+                name: authName.value.trim(),
+                email: authEmail.value.trim(),
+                password: authPassword.value,
+                password_confirmation: authPasswordConfirmation.value,
+            });
+
+            authToken.value = response.token;
+            authUser.value = response.user;
+        } else {
+            const response = await login({
+                email: authEmail.value.trim(),
+                password: authPassword.value,
+            });
+
+            authToken.value = response.token;
+            authUser.value = response.user;
+        }
+
+        authPassword.value = '';
+        authPasswordConfirmation.value = '';
+        await loadWorkspaceFromServer(true);
+    } catch (error) {
+        authError.value = error instanceof Error ? error.message : 'Authentication failed.';
+    } finally {
+        authLoading.value = false;
+    }
+}
+
+async function logoutUser(): Promise<void> {
+    if (!authToken.value) {
+        return;
+    }
+
+    await logout(authToken.value);
+
+    authToken.value = null;
+    authUser.value = null;
+    hasLoadedWorkspace.value = false;
+    tabs.value = createDefaultTabs();
+    activeTabId.value = tabs.value[0].id;
+    tabVariables.value = { [tabs.value[0].id]: {} };
+}
+
+async function loadWorkspaceFromServer(force = false): Promise<void> {
+    if (!authToken.value || !isOnline.value) {
+        return;
+    }
+
+    if (hasLoadedWorkspace.value && !force) {
+        return;
+    }
+
+    isSyncing.value = true;
+    syncError.value = null;
+
+    try {
+        const remoteTabs = await fetchWorkspace(authToken.value);
+        const nextTabs = remoteTabs.length > 0 ? remoteTabs : createDefaultTabs();
+
+        tabs.value = nextTabs;
+        activeTabId.value = nextTabs[0]?.id ?? '';
+        tabVariables.value = Object.fromEntries(nextTabs.map((tab) => [tab.id, {}]));
+        hasLoadedWorkspace.value = true;
+    } catch (error) {
+        syncError.value = error instanceof Error ? error.message : 'Failed loading workspace.';
+    } finally {
+        isSyncing.value = false;
+    }
+}
+
+function scheduleWorkspaceSave(): void {
+    if (!authToken.value || !isOnline.value || !hasLoadedWorkspace.value) {
+        return;
+    }
+
+    if (saveWorkspaceTimeout.value) {
+        clearTimeout(saveWorkspaceTimeout.value);
+    }
+
+    saveWorkspaceTimeout.value = setTimeout(async () => {
+        if (!authToken.value) {
+            return;
+        }
+
+        isSyncing.value = true;
+        syncError.value = null;
+
+        try {
+            await saveWorkspace(authToken.value, tabs.value);
+        } catch (error) {
+            syncError.value = error instanceof Error ? error.message : 'Failed saving workspace.';
+        } finally {
+            isSyncing.value = false;
+        }
+    }, 500);
+}
 
 watch(activeTabId, () => {
     commandHistoryIndex.value = null;
     commandHistoryDraft.value = '';
+});
+
+watch(isOnline, async (online) => {
+    if (online && isAuthenticated.value) {
+        if (!hasLoadedWorkspace.value) {
+            await loadWorkspaceFromServer();
+            return;
+        }
+
+        scheduleWorkspaceSave();
+    }
+});
+
+onMounted(() => {
+    updateOnlineStatus();
+    window.addEventListener('online', updateOnlineStatus);
+    window.addEventListener('offline', updateOnlineStatus);
+
+    if (authToken.value && !authUser.value) {
+        me(authToken.value)
+            .then((user) => {
+                authUser.value = user;
+                return loadWorkspaceFromServer();
+            })
+            .catch(() => {
+                clearStoredAuth();
+                authToken.value = null;
+                authUser.value = null;
+            });
+    } else if (isAuthenticated.value) {
+        void loadWorkspaceFromServer();
+    }
+});
+
+onBeforeUnmount(() => {
+    window.removeEventListener('online', updateOnlineStatus);
+    window.removeEventListener('offline', updateOnlineStatus);
+
+    if (syncPulseTimeout.value) {
+        clearTimeout(syncPulseTimeout.value);
+        syncPulseTimeout.value = null;
+    }
+
+    if (saveWorkspaceTimeout.value) {
+        clearTimeout(saveWorkspaceTimeout.value);
+        saveWorkspaceTimeout.value = null;
+    }
 });
 </script>
 
@@ -306,180 +522,98 @@ watch(activeTabId, () => {
                         <h1 class="text-base font-semibold text-emerald-400 md:text-lg">PWACommands</h1>
                         <p class="text-xs text-zinc-400 md:text-sm">Console Workspace</p>
                     </div>
-                    <div class="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-300">
-                        Synced
+                    <div class="flex items-center gap-3">
+                        <div v-if="isAuthenticated" class="text-right text-xs text-zinc-400">
+                            <p class="text-zinc-200">{{ authUser?.name }}</p>
+                            <p>{{ authUser?.email }}</p>
+                            <button class="mt-1 text-red-400 hover:text-red-300" @click="logoutUser">Logout</button>
+                        </div>
+                        <SyncStatusBadge :is-online="isOnline" :is-syncing="isSyncing" />
                     </div>
                 </div>
+                <div v-if="!isAuthenticated" class="mt-3 flex flex-wrap items-end gap-2">
+                    <input
+                        v-if="authMode === 'register'"
+                        v-model="authName"
+                        type="text"
+                        placeholder="Name"
+                        class="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-100 outline-none focus:border-emerald-500"
+                    >
+                    <input
+                        v-model="authEmail"
+                        type="email"
+                        placeholder="Email"
+                        class="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-100 outline-none focus:border-emerald-500"
+                    >
+                    <input
+                        v-model="authPassword"
+                        type="password"
+                        placeholder="Password"
+                        class="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-100 outline-none focus:border-emerald-500"
+                    >
+                    <input
+                        v-if="authMode === 'register'"
+                        v-model="authPasswordConfirmation"
+                        type="password"
+                        placeholder="Confirm password"
+                        class="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-100 outline-none focus:border-emerald-500"
+                    >
+                    <button
+                        type="button"
+                        class="rounded border border-emerald-600 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-300 hover:bg-emerald-500/20"
+                        :disabled="authLoading"
+                        @click="submitAuth"
+                    >
+                        {{ authLoading ? 'Please wait...' : (authMode === 'register' ? 'Register' : 'Login') }}
+                    </button>
+                    <button
+                        type="button"
+                        class="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs text-zinc-300 hover:border-zinc-500"
+                        @click="authMode = authMode === 'register' ? 'login' : 'register'"
+                    >
+                        {{ authMode === 'register' ? 'Use Login' : 'Use Register' }}
+                    </button>
+                    <p v-if="authError" class="w-full text-xs text-red-400">{{ authError }}</p>
+                </div>
+                <p v-if="syncError" class="mt-2 text-xs text-red-400">{{ syncError }}</p>
             </header>
 
-            <section class="border-b border-zinc-800 p-3">
-                <div class="flex items-center gap-2 overflow-x-auto pb-1">
-                    <button
-                        v-for="tab in tabs"
-                        :key="tab.id"
-                        type="button"
-                        class="cursor-pointer inline-flex items-center gap-2 rounded border px-3 py-1.5 text-xs md:text-sm"
-                        :class="tab.id === activeTabId ? 'border-emerald-500 bg-emerald-500/10 text-emerald-300' : 'border-zinc-700 bg-zinc-900 text-zinc-300'"
-                        @click="activeTabId = tab.id"
-                    >
-                        <template v-if="editingTabId === tab.id">
-                            <input
-                                v-model="editingTabName"
-                                :data-tab-rename="tab.id"
-                                type="text"
-                                class="w-24 rounded border border-zinc-600 bg-zinc-900 px-1.5 py-0.5 text-xs text-zinc-100 outline-none focus:border-emerald-500 md:w-32 md:text-sm"
-                                @click.stop
-                                @keydown.enter.prevent="saveTabRename(tab.id)"
-                                @keydown.esc.prevent="cancelTabRename"
-                                @blur="saveTabRename(tab.id)"
-                            >
-                        </template>
-                        <span
-                            v-else
-                            class="cursor-text"
-                            @click.stop="startTabRename(tab)"
-                        >
-                            {{ tab.name }}
-                        </span>
-                        <span
-                            v-if="tabs.length > 1"
-                            class="cursor-pointer text-zinc-500 hover:text-red-400"
-                            @click.stop="removeTab(tab.id)"
-                        >
-                            ×
-                        </span>
-                    </button>
+            <TabsBar
+                :tabs="tabs"
+                :active-tab-id="activeTabId"
+                :editing-tab-id="editingTabId"
+                :editing-tab-name="editingTabName"
+                @activate-tab="activeTabId = $event"
+                @add-tab="addTab"
+                @remove-tab="removeTab"
+                @start-rename="startTabRename"
+                @save-rename="saveTabRename"
+                @cancel-rename="cancelTabRename"
+                @update:editing-tab-name="editingTabName = $event"
+            />
 
-                    <button
-                        type="button"
-                        class="cursor-pointer rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:border-zinc-500 md:text-sm"
-                        @click="addTab"
-                    >
-                        + New Tab
-                    </button>
-                </div>
-            </section>
+            <HistoryPanel
+                ref="historyPanelRef"
+                :entries="activeTab.entries"
+                :copied-key="copiedKey"
+                @clear-history="clearActiveTabHistory"
+                @remove-entry="removeEntry"
+                @copy-command="copyText($event.value, $event.key)"
+                @copy-response="copyText($event.value, $event.key)"
+            />
 
-            <section ref="historyContainerRef" class="min-h-0 flex-1 overflow-y-auto p-3 md:p-4">
-                <div class="mb-3 flex items-center justify-end">
-                    <button
-                        type="button"
-                        class="cursor-pointer rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:border-red-500 hover:text-red-400 md:text-sm"
-                        @click="clearActiveTabHistory"
-                    >
-                        Clear Tab History
-                    </button>
-                </div>
-                <div class="space-y-4">
-                    <article
-                        v-for="entry in activeTab.entries"
-                        :key="entry.id"
-                        class="space-y-1"
-                    >
-                        <div class="group flex items-start gap-2 rounded border border-transparent px-2 py-1 hover:border-zinc-700">
-                            <div class="relative">
-                                <span class="cursor-help text-emerald-400">&gt;</span>
-                                <span class="pointer-events-none absolute -left-4 -top-6 hidden whitespace-nowrap rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-300 group-hover:block">
-                                    {{ new Date(entry.timestamp).toLocaleString() }}
-                                </span>
-                            </div>
-                            <pre class="flex-1 pt-0.5 whitespace-pre-wrap wrap-break-word text-xs text-emerald-300 md:text-sm">{{ entry.command }}</pre>
-                            <button
-                                type="button"
-                                class="cursor-pointer pt-0.5  opacity-0 transition-opacity text-xs text-zinc-400 hover:text-zinc-200 group-hover:opacity-100"
-                                @click="copyText(entry.command, `${entry.id}:prompt`)"
-                            >
-                                {{ copiedKey === `${entry.id}:prompt` ? 'Copied' : 'Copy' }}
-                            </button>
-                            <button
-                                type="button"
-                                class="cursor-pointer pt-0.5 opacity-0 transition-opacity text-xs text-zinc-400 hover:text-red-400 group-hover:opacity-100"
-                                @click="removeEntry(entry.id)"
-                            >
-                                Remove
-                            </button>
-                        </div>
-
-                        <div class="group flex items-start gap-2 rounded border border-transparent px-2 py-1 hover:border-zinc-700">
-                            <span class=" text-zinc-500">&lt;</span>
-                            <pre
-                                class="pt-0.5 flex-1 whitespace-pre-wrap wrap-break-word text-xs md:text-sm"
-                                :class="{
-                                    'text-emerald-400': entry.status === 'success',
-                                    'text-red-400': entry.status === 'error',
-                                    'text-sky-400': entry.status === 'info',
-                                }"
-                            >{{ entry.response }}</pre>
-                            <button
-                                type="button"
-                                class="cursor-pointer pt-0.5 opacity-0 transition-opacity text-xs text-zinc-400 hover:text-zinc-200 group-hover:opacity-100"
-                                @click="copyText(entry.response, `${entry.id}:response`)"
-                            >
-                                {{ copiedKey === `${entry.id}:response` ? 'Copied' : 'Copy' }}
-                            </button>
-                        </div>
-                    </article>
-                </div>
-            </section>
-
-            <section class="border-t border-zinc-800 bg-zinc-950/95 p-3 md:p-4">
-                <label class="mb-2 block text-xs text-zinc-400">Command Input</label>
-                <textarea
-                    ref="commandInputRef"
-                    v-model="commandInput"
-                    placeholder='Try: list:unique --list="1,2,2,3"'
-                    class="w-full overflow-hidden rounded border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
-                    @keydown="handleCommandInputKeydown"
-                />
-
-                <div class="mt-3 flex items-center justify-between gap-3">
-                    <div class="hidden text-xs text-zinc-500 md:block">
-                        Tab variables:
-                        <span
-                            v-if="Object.keys(activeVariables).length === 0"
-                            class="text-zinc-600"
-                        > none </span>
-                        <span
-                            v-for="variable in Object.keys(activeVariables)"
-                            :key="variable"
-                            class="group relative ml-1 inline-flex"
-                        >
-                            <button
-                                type="button"
-                                class="cursor-pointer text-emerald-400 hover:text-emerald-300"
-                                @click="copyText(activeVariables[variable], `var:${variable}`)"
-                            >
-                                {{ copiedKey === `var:${variable}` ? 'Copied' : `$${variable}` }}
-                            </button>
-                            <span class="pointer-events-none absolute bottom-full left-0 z-10 mb-1 hidden max-w-80 whitespace-pre-wrap wrap-break-workd rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-200 group-hover:block">
-                                {{ activeVariables[variable] || '(empty)' }}
-                            </span>
-                        </span>
-                    </div>
-                    <button
-                        type="button"
-                        class="rounded border border-emerald-600 bg-emerald-500/10 px-4 py-2 text-sm text-emerald-300 hover:bg-emerald-500/20"
-                        @click="submitCommand"
-                    >
-                        Run Command
-                    </button>
-                </div>
-
-                <div class="mt-3 rounded border border-zinc-800 bg-zinc-900/80 p-2">
-                    <p class="mb-1 text-xs text-zinc-400">Suggestions</p>
-                    <div class="flex flex-wrap gap-2">
-                        <button
-                            v-for="suggestion in tabSuggestions"
-                            :key="suggestion"
-                            type="button"
-                            class="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:border-zinc-500"
-                            @click="commandInput = suggestion"
-                        >
-                            {{ suggestion }}
-                        </button>
-                    </div>
-                </div>
-            </section>
+            <CommandInputPanel
+                ref="commandInputPanelRef"
+                :command-input="commandInput"
+                :tab-suggestions="tabSuggestions"
+                :active-variables="activeVariables"
+                :copied-key="copiedKey"
+                @update:command-input="commandInput = $event"
+                @submit="submitCommand"
+                @keydown-input="handleCommandInputKeydown"
+                @copy-variable="copyText($event.value, $event.key)"
+                @select-suggestion="selectSuggestion"
+            />
         </div>
     </main>
 </template>
