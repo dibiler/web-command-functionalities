@@ -101,6 +101,7 @@ function parsePrompt(prompt: string, variables: Record<string, string>): ParsedC
 
     const [name, ...args] = tokens;
     const input: CommandInputValues = {};
+    const positionalArgs: unknown[] = [];
 
     for (let index = 0; index < args.length; index += 1) {
         const token = args[index];
@@ -127,7 +128,15 @@ function parsePrompt(prompt: string, variables: Record<string, string>): ParsedC
             if (args[index + 1] && !args[index + 1].startsWith('-')) {
                 index += 1;
             }
+
+            continue;
         }
+
+        positionalArgs.push(resolveVariableValue(token, variables));
+    }
+
+    if (positionalArgs.length > 0) {
+        input._args = positionalArgs;
     }
 
     return {

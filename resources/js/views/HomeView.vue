@@ -12,7 +12,7 @@ const tabs = ref<ConsoleTab[]>([
             {
                 id: crypto.randomUUID(),
                 command: 'help list',
-                response: 'Available commands in list group: list:random, list:unique, list:filter, list:sortAsc',
+                response: 'Available commands in list group: list:random, list:unique, list:filter, list:sort',
                 status: 'info',
                 timestamp: new Date().toISOString(),
             },
@@ -23,6 +23,9 @@ const tabs = ref<ConsoleTab[]>([
 const activeTabId = ref(tabs.value[0].id);
 const commandInput = ref('');
 const commandInputRef = ref<HTMLTextAreaElement | null>(null);
+const commandHistoryIndex = ref<number | null>(null);
+const commandHistoryDraft = ref('');
+const historyContainerRef = ref<HTMLElement | null>(null);
 const editingTabId = ref<string | null>(null);
 const editingTabName = ref('');
 const copiedKey = ref<string | null>(null);
@@ -59,6 +62,27 @@ function removeTab(tabId: string): void {
     if (activeTabId.value === tabId) {
         activeTabId.value = tabs.value[0].id;
     }
+}
+
+function clearActiveTabHistory(): void {
+    if (!activeTab.value) {
+        return;
+    }
+
+    activeTab.value.entries = [];
+    commandHistoryIndex.value = null;
+    commandHistoryDraft.value = '';
+}
+
+function removeEntry(entryId: string): void {
+    if (!activeTab.value) {
+        return;
+    }
+
+    activeTab.value.entries = activeTab.value.entries.filter((entry) => entry.id !== entryId);
+
+    commandHistoryIndex.value = null;
+    commandHistoryDraft.value = '';
 }
 
 function startTabRename(tab: ConsoleTab): void {
@@ -124,13 +148,65 @@ function submitCommand(): void {
     });
 
     commandInput.value = '';
+    commandHistoryIndex.value = null;
+    commandHistoryDraft.value = '';
 
     nextTick(() => {
         autoResizeCommandInput();
+        scrollHistoryToBottom();
     });
 }
 
 function handleCommandInputKeydown(event: KeyboardEvent): void {
+    const isPlainArrowNavigation =
+        (event.key === 'ArrowUp' || event.key === 'ArrowDown')
+        && !event.ctrlKey
+        && !event.metaKey
+        && !event.shiftKey
+        && !event.altKey;
+
+    if (isPlainArrowNavigation) {
+        const history = activeTab.value?.entries.map((entry) => entry.command) ?? [];
+
+        if (history.length === 0) {
+            return;
+        }
+
+        event.preventDefault();
+
+        if (event.key === 'ArrowUp') {
+            if (commandHistoryIndex.value === null) {
+                commandHistoryDraft.value = commandInput.value;
+                commandHistoryIndex.value = history.length - 1;
+            } else {
+                commandHistoryIndex.value = Math.max(0, commandHistoryIndex.value - 1);
+            }
+
+            commandInput.value = history[commandHistoryIndex.value];
+            nextTick(() => {
+                moveCursorToInputEnd();
+            });
+            return;
+        }
+
+        if (commandHistoryIndex.value === null) {
+            return;
+        }
+
+        if (commandHistoryIndex.value < history.length - 1) {
+            commandHistoryIndex.value += 1;
+            commandInput.value = history[commandHistoryIndex.value];
+        } else {
+            commandHistoryIndex.value = null;
+            commandInput.value = commandHistoryDraft.value;
+        }
+
+        nextTick(() => {
+            moveCursorToInputEnd();
+        });
+        return;
+    }
+
     if (event.key !== 'Enter') {
         return;
     }
@@ -162,6 +238,16 @@ function handleCommandInputKeydown(event: KeyboardEvent): void {
     submitCommand();
 }
 
+function moveCursorToInputEnd(): void {
+    if (!commandInputRef.value) {
+        return;
+    }
+
+    const position = commandInputRef.value.value.length;
+    commandInputRef.value.selectionStart = position;
+    commandInputRef.value.selectionEnd = position;
+}
+
 function autoResizeCommandInput(): void {
     if (!commandInputRef.value) {
         return;
@@ -169,6 +255,23 @@ function autoResizeCommandInput(): void {
 
     commandInputRef.value.style.height = 'auto';
     commandInputRef.value.style.height = `${commandInputRef.value.scrollHeight}px`;
+}
+
+function scrollHistoryToBottom(): void {
+    if (!historyContainerRef.value) {
+        return;
+    }
+
+    const target = historyContainerRef.value;
+
+    target.scrollTop = target.scrollHeight;
+
+    const lastRow = target.querySelector('article:last-of-type');
+    lastRow?.scrollIntoView({ block: 'end' });
+
+    requestAnimationFrame(() => {
+        target.scrollTop = target.scrollHeight;
+    });
 }
 
 async function copyText(value: string, key: string): Promise<void> {
@@ -187,11 +290,16 @@ watch(commandInput, () => {
         autoResizeCommandInput();
     });
 });
+
+watch(activeTabId, () => {
+    commandHistoryIndex.value = null;
+    commandHistoryDraft.value = '';
+});
 </script>
 
 <template>
-    <main class="min-h-screen bg-zinc-950 font-mono text-zinc-100">
-        <div class="mx-auto flex min-h-screen w-full max-w-6xl flex-col">
+    <main class="h-screen overflow-hidden bg-zinc-950 font-mono text-zinc-100">
+        <div class="mx-auto flex h-full w-full max-w-6xl flex-col overflow-hidden">
             <header class="border-b border-zinc-800 p-4">
                 <div class="flex items-center justify-between gap-3">
                     <div>
@@ -210,7 +318,7 @@ watch(commandInput, () => {
                         v-for="tab in tabs"
                         :key="tab.id"
                         type="button"
-                        class="inline-flex items-center gap-2 rounded border px-3 py-1.5 text-xs md:text-sm"
+                        class="cursor-pointer inline-flex items-center gap-2 rounded border px-3 py-1.5 text-xs md:text-sm"
                         :class="tab.id === activeTabId ? 'border-emerald-500 bg-emerald-500/10 text-emerald-300' : 'border-zinc-700 bg-zinc-900 text-zinc-300'"
                         @click="activeTabId = tab.id"
                     >
@@ -244,7 +352,7 @@ watch(commandInput, () => {
 
                     <button
                         type="button"
-                        class="rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:border-zinc-500 md:text-sm"
+                        class="cursor-pointer rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:border-zinc-500 md:text-sm"
                         @click="addTab"
                     >
                         + New Tab
@@ -252,7 +360,16 @@ watch(commandInput, () => {
                 </div>
             </section>
 
-            <section class="flex-1 overflow-y-auto p-3 md:p-4">
+            <section ref="historyContainerRef" class="min-h-0 flex-1 overflow-y-auto p-3 md:p-4">
+                <div class="mb-3 flex items-center justify-end">
+                    <button
+                        type="button"
+                        class="cursor-pointer rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:border-red-500 hover:text-red-400 md:text-sm"
+                        @click="clearActiveTabHistory"
+                    >
+                        Clear Tab History
+                    </button>
+                </div>
                 <div class="space-y-4">
                     <article
                         v-for="entry in activeTab.entries"
@@ -266,20 +383,27 @@ watch(commandInput, () => {
                                     {{ new Date(entry.timestamp).toLocaleString() }}
                                 </span>
                             </div>
-                            <pre class="flex-1 whitespace-pre-wrap wrap-break-word text-xs text-emerald-300 md:text-sm">{{ entry.command }}</pre>
+                            <pre class="flex-1 pt-0.5 whitespace-pre-wrap wrap-break-word text-xs text-emerald-300 md:text-sm">{{ entry.command }}</pre>
                             <button
                                 type="button"
-                                class="pt-0.5  opacity-0 transition-opacity text-xs text-zinc-400 hover:text-zinc-200 group-hover:opacity-100"
+                                class="cursor-pointer pt-0.5  opacity-0 transition-opacity text-xs text-zinc-400 hover:text-zinc-200 group-hover:opacity-100"
                                 @click="copyText(entry.command, `${entry.id}:prompt`)"
                             >
                                 {{ copiedKey === `${entry.id}:prompt` ? 'Copied' : 'Copy' }}
+                            </button>
+                            <button
+                                type="button"
+                                class="cursor-pointer pt-0.5 opacity-0 transition-opacity text-xs text-zinc-400 hover:text-red-400 group-hover:opacity-100"
+                                @click="removeEntry(entry.id)"
+                            >
+                                Remove
                             </button>
                         </div>
 
                         <div class="group flex items-start gap-2 rounded border border-transparent px-2 py-1 hover:border-zinc-700">
                             <span class=" text-zinc-500">&lt;</span>
                             <pre
-                                class="flex-1 whitespace-pre-wrap wrap-break-word text-xs md:text-sm"
+                                class="pt-0.5 flex-1 whitespace-pre-wrap wrap-break-word text-xs md:text-sm"
                                 :class="{
                                     'text-emerald-400': entry.status === 'success',
                                     'text-red-400': entry.status === 'error',
@@ -288,7 +412,7 @@ watch(commandInput, () => {
                             >{{ entry.response }}</pre>
                             <button
                                 type="button"
-                                class="pt-0.5 opacity-0 transition-opacity text-xs text-zinc-400 hover:text-zinc-200 group-hover:opacity-100"
+                                class="cursor-pointer pt-0.5 opacity-0 transition-opacity text-xs text-zinc-400 hover:text-zinc-200 group-hover:opacity-100"
                                 @click="copyText(entry.response, `${entry.id}:response`)"
                             >
                                 {{ copiedKey === `${entry.id}:response` ? 'Copied' : 'Copy' }}
@@ -318,9 +442,18 @@ watch(commandInput, () => {
                         <span
                             v-for="variable in Object.keys(activeVariables)"
                             :key="variable"
-                            class="ml-1 text-emerald-400"
+                            class="group relative ml-1 inline-flex"
                         >
-                            ${{ variable }}
+                            <button
+                                type="button"
+                                class="cursor-pointer text-emerald-400 hover:text-emerald-300"
+                                @click="copyText(activeVariables[variable], `var:${variable}`)"
+                            >
+                                {{ copiedKey === `var:${variable}` ? 'Copied' : `$${variable}` }}
+                            </button>
+                            <span class="pointer-events-none absolute bottom-full left-0 z-10 mb-1 hidden max-w-80 whitespace-pre-wrap wrap-break-workd rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-200 group-hover:block">
+                                {{ activeVariables[variable] || '(empty)' }}
+                            </span>
                         </span>
                     </div>
                     <button

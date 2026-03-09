@@ -1,6 +1,6 @@
-import { AbstractCommand } from '../AbstractCommand';
+import { AbstractCommand } from '../../AbstractCommand';
 
-import type { CommandExecutionContext, CommandExecutionResult, CommandInputValues } from '../../types/commands';
+import type { CommandExecutionContext, CommandExecutionResult, CommandInputValues } from '../../../types/commands';
 
 export class ListRandomCommand extends AbstractCommand {
     readonly name = 'list:random';
@@ -12,14 +12,24 @@ export class ListRandomCommand extends AbstractCommand {
             name: 'list',
             type: 'string',
             required: true,
-            description: 'Comma-separated list input.',
+            description: 'List input.',
             shortAlias: 'l',
             longAlias: 'list',
+        },
+        {
+            name: 'separator',
+            type: 'string',
+            required: false,
+            description: 'List separator character/string.',
+            defaultValue: ',',
+            shortAlias: 's',
+            longAlias: 'separator',
         },
     ] as const;
 
     execute(input: CommandInputValues, _context: CommandExecutionContext): CommandExecutionResult {
-        const values = this.parseCommaSeparatedList(input.list);
+        const separator = typeof input.separator === 'string' && input.separator.length > 0 ? input.separator : ',';
+        const values = this.parseSeparatedList(input.list, separator);
 
         if (values.length === 0) {
             return {

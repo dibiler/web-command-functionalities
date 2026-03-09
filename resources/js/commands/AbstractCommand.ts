@@ -23,13 +23,17 @@ export abstract class AbstractCommand {
         };
     }
 
-    protected parseCommaSeparatedList(rawValue: unknown): string[] {
+    protected parseSeparatedList(rawValue: unknown, separator: unknown = ','): string[] {
         if (typeof rawValue !== 'string') {
             return [];
         }
 
+        const parsedSeparator = typeof separator === 'string' && separator.length > 0
+            ? separator
+            : ',';
+
         return rawValue
-            .split(',')
+            .split(parsedSeparator)
             .map((item) => item.trim())
             .filter((item) => item.length > 0);
     }

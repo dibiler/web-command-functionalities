@@ -5,6 +5,7 @@ export type CommandParameterDefinition = {
     type: CommandParameterType;
     required: boolean;
     description: string;
+    defaultValue?: unknown;
     shortAlias?: string;
     longAlias?: string;
 };

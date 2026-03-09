@@ -1,6 +1,6 @@
-import { AbstractCommand } from '../AbstractCommand';
+import { AbstractCommand } from '../../AbstractCommand';
 
-import type { CommandExecutionContext, CommandExecutionResult, CommandInputValues } from '../../types/commands';
+import type { CommandExecutionContext, CommandExecutionResult, CommandInputValues } from '../../../types/commands';
 
 export class ListFilterCommand extends AbstractCommand {
     readonly name = 'list:filter';
@@ -12,7 +12,7 @@ export class ListFilterCommand extends AbstractCommand {
             name: 'list',
             type: 'string',
             required: true,
-            description: 'Comma-separated list input.',
+            description: 'List input.',
             shortAlias: 'l',
             longAlias: 'list',
         },
@@ -24,15 +24,25 @@ export class ListFilterCommand extends AbstractCommand {
             shortAlias: 'q',
             longAlias: 'query',
         },
+        {
+            name: 'separator',
+            type: 'string',
+            required: false,
+            description: 'List separator character/string.',
+            defaultValue: ',',
+            shortAlias: 's',
+            longAlias: 'separator',
+        },
     ] as const;
 
     execute(input: CommandInputValues, _context: CommandExecutionContext): CommandExecutionResult {
-        const values = this.parseCommaSeparatedList(input.list);
+        const separator = typeof input.separator === 'string' && input.separator.length > 0 ? input.separator : ',';
+        const values = this.parseSeparatedList(input.list, separator);
         const query = typeof input.query === 'string' ? input.query : '';
 
         return {
             ok: true,
-            output: values.filter((value) => value.includes(query)).join(','),
+            output: values.filter((value) => value.includes(query)).join(separator),
         };
     }
 }
