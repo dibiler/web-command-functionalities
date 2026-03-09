@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 
 import { buildCommandSuggestions, executeCommandPrompt, getAvailableCommands } from '../services/commands';
 import type { ConsoleTab } from '../types/console';
@@ -22,6 +22,10 @@ const tabs = ref<ConsoleTab[]>([
 
 const activeTabId = ref(tabs.value[0].id);
 const commandInput = ref('');
+const commandInputRef = ref<HTMLTextAreaElement | null>(null);
+const editingTabId = ref<string | null>(null);
+const editingTabName = ref('');
+const copiedKey = ref<string | null>(null);
 const commandDefinitions = getAvailableCommands();
 const tabVariables = ref<Record<string, Record<string, string>>>({
     [tabs.value[0].id]: {},
@@ -57,6 +61,44 @@ function removeTab(tabId: string): void {
     }
 }
 
+function startTabRename(tab: ConsoleTab): void {
+    editingTabId.value = tab.id;
+    editingTabName.value = tab.name;
+
+    nextTick(() => {
+        const input = document.querySelector<HTMLInputElement>(`input[data-tab-rename="${tab.id}"]`);
+        input?.focus();
+        input?.select();
+    });
+}
+
+function saveTabRename(tabId: string): void {
+    const newName = editingTabName.value.trim();
+
+    if (!newName) {
+        cancelTabRename();
+        return;
+    }
+
+    tabs.value = tabs.value.map((tab) => {
+        if (tab.id !== tabId) {
+            return tab;
+        }
+
+        return {
+            ...tab,
+            name: newName,
+        };
+    });
+
+    cancelTabRename();
+}
+
+function cancelTabRename(): void {
+    editingTabId.value = null;
+    editingTabName.value = '';
+}
+
 function submitCommand(): void {
     const value = commandInput.value.trim();
 
@@ -82,7 +124,69 @@ function submitCommand(): void {
     });
 
     commandInput.value = '';
+
+    nextTick(() => {
+        autoResizeCommandInput();
+    });
 }
+
+function handleCommandInputKeydown(event: KeyboardEvent): void {
+    if (event.key !== 'Enter') {
+        return;
+    }
+
+    const textarea = event.target as HTMLTextAreaElement | null;
+
+    if (event.ctrlKey || event.metaKey) {
+        event.preventDefault();
+
+        if (!textarea) {
+            commandInput.value += '\n';
+            return;
+        }
+
+        const start = textarea.selectionStart ?? commandInput.value.length;
+        const end = textarea.selectionEnd ?? commandInput.value.length;
+
+        commandInput.value = `${commandInput.value.slice(0, start)}\n${commandInput.value.slice(end)}`;
+
+        nextTick(() => {
+            textarea.selectionStart = start + 1;
+            textarea.selectionEnd = start + 1;
+        });
+
+        return;
+    }
+
+    event.preventDefault();
+    submitCommand();
+}
+
+function autoResizeCommandInput(): void {
+    if (!commandInputRef.value) {
+        return;
+    }
+
+    commandInputRef.value.style.height = 'auto';
+    commandInputRef.value.style.height = `${commandInputRef.value.scrollHeight}px`;
+}
+
+async function copyText(value: string, key: string): Promise<void> {
+    await navigator.clipboard.writeText(value);
+    copiedKey.value = key;
+
+    setTimeout(() => {
+        if (copiedKey.value === key) {
+            copiedKey.value = null;
+        }
+    }, 1200);
+}
+
+watch(commandInput, () => {
+    nextTick(() => {
+        autoResizeCommandInput();
+    });
+});
 </script>
 
 <template>
@@ -110,7 +214,25 @@ function submitCommand(): void {
                         :class="tab.id === activeTabId ? 'border-emerald-500 bg-emerald-500/10 text-emerald-300' : 'border-zinc-700 bg-zinc-900 text-zinc-300'"
                         @click="activeTabId = tab.id"
                     >
-                        <span>{{ tab.name }}</span>
+                        <template v-if="editingTabId === tab.id">
+                            <input
+                                v-model="editingTabName"
+                                :data-tab-rename="tab.id"
+                                type="text"
+                                class="w-24 rounded border border-zinc-600 bg-zinc-900 px-1.5 py-0.5 text-xs text-zinc-100 outline-none focus:border-emerald-500 md:w-32 md:text-sm"
+                                @click.stop
+                                @keydown.enter.prevent="saveTabRename(tab.id)"
+                                @keydown.esc.prevent="cancelTabRename"
+                                @blur="saveTabRename(tab.id)"
+                            >
+                        </template>
+                        <span
+                            v-else
+                            class="cursor-text"
+                            @click.stop="startTabRename(tab)"
+                        >
+                            {{ tab.name }}
+                        </span>
                         <span
                             v-if="tabs.length > 1"
                             class="cursor-pointer text-zinc-500 hover:text-red-400"
@@ -135,37 +257,43 @@ function submitCommand(): void {
                     <article
                         v-for="entry in activeTab.entries"
                         :key="entry.id"
-                        class="rounded border border-zinc-800 bg-zinc-900/70 p-3"
+                        class="space-y-1"
                     >
-                        <div class="mb-2 flex items-center justify-between">
-                            <span class="text-xs text-zinc-400">{{ new Date(entry.timestamp).toLocaleString() }}</span>
-                            <span
-                                class="text-xs"
+                        <div class="group flex items-start gap-2 rounded border border-transparent px-2 py-1 hover:border-zinc-700">
+                            <div class="relative">
+                                <span class="cursor-help text-emerald-400">&gt;</span>
+                                <span class="pointer-events-none absolute -left-4 -top-6 hidden whitespace-nowrap rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-300 group-hover:block">
+                                    {{ new Date(entry.timestamp).toLocaleString() }}
+                                </span>
+                            </div>
+                            <pre class="flex-1 whitespace-pre-wrap wrap-break-word text-xs text-emerald-300 md:text-sm">{{ entry.command }}</pre>
+                            <button
+                                type="button"
+                                class="pt-0.5  opacity-0 transition-opacity text-xs text-zinc-400 hover:text-zinc-200 group-hover:opacity-100"
+                                @click="copyText(entry.command, `${entry.id}:prompt`)"
+                            >
+                                {{ copiedKey === `${entry.id}:prompt` ? 'Copied' : 'Copy' }}
+                            </button>
+                        </div>
+
+                        <div class="group flex items-start gap-2 rounded border border-transparent px-2 py-1 hover:border-zinc-700">
+                            <span class=" text-zinc-500">&lt;</span>
+                            <pre
+                                class="flex-1 whitespace-pre-wrap wrap-break-word text-xs md:text-sm"
                                 :class="{
                                     'text-emerald-400': entry.status === 'success',
                                     'text-red-400': entry.status === 'error',
                                     'text-sky-400': entry.status === 'info',
                                 }"
+                            >{{ entry.response }}</pre>
+                            <button
+                                type="button"
+                                class="pt-0.5 opacity-0 transition-opacity text-xs text-zinc-400 hover:text-zinc-200 group-hover:opacity-100"
+                                @click="copyText(entry.response, `${entry.id}:response`)"
                             >
-                                {{ entry.status }}
-                            </span>
+                                {{ copiedKey === `${entry.id}:response` ? 'Copied' : 'Copy' }}
+                            </button>
                         </div>
-
-                        <label class="mb-1 block text-xs text-zinc-400">Prompt</label>
-                        <textarea
-                            :value="entry.command"
-                            readonly
-                            rows="2"
-                            class="w-full resize-y rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-emerald-300 md:text-sm"
-                        />
-
-                        <label class="mb-1 mt-3 block text-xs text-zinc-400">Response</label>
-                        <textarea
-                            :value="entry.response"
-                            readonly
-                            rows="3"
-                            class="w-full resize-y rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200 md:text-sm"
-                        />
                     </article>
                 </div>
             </section>
@@ -173,10 +301,11 @@ function submitCommand(): void {
             <section class="border-t border-zinc-800 bg-zinc-950/95 p-3 md:p-4">
                 <label class="mb-2 block text-xs text-zinc-400">Command Input</label>
                 <textarea
+                    ref="commandInputRef"
                     v-model="commandInput"
-                    rows="3"
                     placeholder='Try: list:unique --list="1,2,2,3"'
-                    class="w-full rounded border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
+                    class="w-full overflow-hidden rounded border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
+                    @keydown="handleCommandInputKeydown"
                 />
 
                 <div class="mt-3 flex items-center justify-between gap-3">
