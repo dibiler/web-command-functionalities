@@ -32,14 +32,22 @@ export function buildCommandSuggestions(commands: CommandDefinition[]): string[]
 
     const sortCommand = commands.find((command) => command.name.includes('sort'))?.name;
     const uniqueCommand = commands.find((command) => command.name.includes('unique'))?.name;
-
+    /*
+        return Array.from(new Set([
+            'help',
+            ...groups.map((group) => `help ${group}`),
+            ...commandExamples,
+            sortCommand ? `$tempList << ${sortCommand} --list="5,3,2,1"` : '',
+            uniqueCommand ? `${uniqueCommand} --list=$tempList` : '',
+        ].filter((entry) => entry.length > 0)));*/
     return Array.from(new Set([
-        'help',
-        ...groups.map((group) => `help ${group}`),
-        ...commandExamples,
-        sortCommand ? `$tempList << ${sortCommand} --list="5,3,2,1"` : '',
-        uniqueCommand ? `${uniqueCommand} --list=$tempList` : '',
-    ].filter((entry) => entry.length > 0)));
+        'list:changeSeparator --separator=";" --newSeparator="," --list=""',
+        'list:changeSeparator --separator="," --newSeparator=";" --list=""',
+        'list:fromRange --step=1 --start=1 --end=10',
+        'list:unique --list=""',
+        'help list',
+        'help string',
+    ]));
 }
 
 export function executeCommandPrompt(

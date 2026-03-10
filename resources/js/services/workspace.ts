@@ -16,7 +16,7 @@ export async function fetchWorkspace(token: string): Promise<ConsoleTab[]> {
 
 export async function saveWorkspace(token: string, tabs: ConsoleTab[]): Promise<void> {
     await httpRequest<{ message: string }>('/workspace', {
-        method: 'PUT',
+        method: 'POST',
         body: JSON.stringify({ tabs }),
     }, token);
 }

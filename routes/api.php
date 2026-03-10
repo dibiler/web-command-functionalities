@@ -20,7 +20,7 @@ Route::prefix('auth')->group(function () {
 
 Route::middleware('auth:sanctum')->group(function () {
     Route::get('/workspace', [WorkspaceController::class, 'index']);
-    Route::put('/workspace', [WorkspaceController::class, 'save']);
+    Route::match(['put', 'post'], '/workspace', [WorkspaceController::class, 'save']);
 });
 
 Route::middleware('auth:sanctum')->get('/user', function (Request $request) {

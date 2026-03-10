@@ -49,12 +49,12 @@ class WorkspaceController extends Controller
             'tabs' => ['required', 'array'],
             'tabs.*.id' => ['required', 'string', 'max:120'],
             'tabs.*.name' => ['required', 'string', 'max:255'],
-            'tabs.*.entries' => ['required', 'array'],
+            'tabs.*.entries' => ['nullable', 'array'],
             'tabs.*.entries.*.id' => ['required', 'string', 'max:120'],
             'tabs.*.entries.*.command' => ['required', 'string'],
             'tabs.*.entries.*.response' => ['required', 'string'],
-            'tabs.*.entries.*.status' => ['required', 'string', 'in:success,error,info'],
-            'tabs.*.entries.*.timestamp' => ['required', 'string'],
+            'tabs.*.entries.*.status' => ['nullable', 'string', 'in:success,error,info'],
+            'tabs.*.entries.*.timestamp' => ['nullable', 'string'],
         ]);
 
         $user = $request->user();
@@ -71,8 +71,12 @@ class WorkspaceController extends Controller
                     'position' => $tabIndex,
                 ]);
 
-                foreach ($tabPayload['entries'] as $entryPayload) {
-                    $executedAt = Carbon::parse($entryPayload['timestamp']);
+                $entries = $tabPayload['entries'] ?? [];
+
+                foreach ($entries as $entryPayload) {
+                    $executedAt = isset($entryPayload['timestamp']) && is_string($entryPayload['timestamp'])
+                        ? Carbon::parse($entryPayload['timestamp'])
+                        : now();
 
                     CommandEntry::query()->create([
                         'user_id' => $user->id,
@@ -80,7 +84,7 @@ class WorkspaceController extends Controller
                         'client_id' => $entryPayload['id'],
                         'command' => $entryPayload['command'],
                         'response' => $entryPayload['response'],
-                        'status' => $entryPayload['status'],
+                        'status' => $entryPayload['status'] ?? 'info',
                         'executed_at' => $executedAt,
                     ]);
                 }

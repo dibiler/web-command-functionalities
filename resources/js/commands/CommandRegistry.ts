@@ -8,6 +8,7 @@ import { ListSortCommand } from './definitions/listCommands/ListSortCommand';
 import { ListUniqueCommand } from './definitions/listCommands/ListUniqueCommand';
 import { StringHashCommand } from './definitions/stringCommands/StringHashCommand';
 import { StringPasswordCommand } from './definitions/stringCommands/StringPasswordCommand';
+import { StringReplaceCommand } from './definitions/stringCommands/StringReplaceCommand';
 
 import type { AbstractCommand } from './AbstractCommand';
 import type { CommandDefinition } from '../types/commands';
@@ -23,6 +24,7 @@ const registry: AbstractCommand[] = [
     new ListChangeSeparatorCommand(),
     new StringHashCommand(),
     new StringPasswordCommand(),
+    new StringReplaceCommand(),
 ];
 
 export function getCommandRegistry(): AbstractCommand[] {

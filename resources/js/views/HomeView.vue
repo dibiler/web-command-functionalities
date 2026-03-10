@@ -8,6 +8,14 @@ import TabsBar from '../components/home/TabsBar.vue';
 import { clearStoredAuth, getStoredToken, getStoredUser, login, logout, me, register } from '../services/auth';
 import { buildCommandSuggestions, executeCommandPrompt, getAvailableCommands } from '../services/commands';
 import { fetchWorkspace, saveWorkspace } from '../services/workspace';
+import {
+    clearQueuedWorkspace,
+    getWorkspaceScope,
+    queueWorkspace,
+    readLocalWorkspace,
+    readQueuedWorkspace,
+    writeLocalWorkspace,
+} from '../services/workspaceOffline';
 import type { AuthUser } from '../types/auth';
 import type { ConsoleTab } from '../types/console';
 
@@ -72,6 +80,24 @@ const tabVariables = ref<Record<string, Record<string, string>>>({
 const activeTab = computed(() => tabs.value.find((tab) => tab.id === activeTabId.value) ?? tabs.value[0]);
 const activeVariables = computed(() => tabVariables.value[activeTabId.value] ?? {});
 const isAuthenticated = computed(() => authUser.value !== null && authToken.value !== null);
+
+function applyWorkspaceTabs(nextTabs: ConsoleTab[]): void {
+    const safeTabs = nextTabs.length > 0 ? nextTabs : createDefaultTabs();
+    tabs.value = safeTabs;
+
+    if (!safeTabs.some((tab) => tab.id === activeTabId.value)) {
+        activeTabId.value = safeTabs[0].id;
+    }
+
+    tabVariables.value = Object.fromEntries(safeTabs.map((tab) => [tab.id, tabVariables.value[tab.id] ?? {}]));
+}
+
+function hydrateLocalWorkspaceForCurrentScope(): void {
+    const cachedTabs = readLocalWorkspace(getWorkspaceScope(authUser.value));
+    if (cachedTabs && cachedTabs.length > 0) {
+        applyWorkspaceTabs(cachedTabs);
+    }
+}
 
 function triggerSyncPulse(duration = 700): void {
     if (!isOnline.value) {
@@ -149,7 +175,7 @@ function clearActiveTabHistory(): void {
     commandHistoryIndex.value = null;
     commandHistoryDraft.value = '';
 
-    scheduleWorkspaceSave();
+    scheduleWorkspaceSave(true);
 }
 
 function removeEntry(entryId: string): void {
@@ -383,7 +409,8 @@ async function submitAuth(): Promise<void> {
 
         authPassword.value = '';
         authPasswordConfirmation.value = '';
-        await loadWorkspaceFromServer(true);
+
+        await loadWorkspaceFromServer(true, true);
     } catch (error) {
         authError.value = error instanceof Error ? error.message : 'Authentication failed.';
     } finally {
@@ -401,12 +428,12 @@ async function logoutUser(): Promise<void> {
     authToken.value = null;
     authUser.value = null;
     hasLoadedWorkspace.value = false;
-    tabs.value = createDefaultTabs();
-    activeTabId.value = tabs.value[0].id;
-    tabVariables.value = { [tabs.value[0].id]: {} };
+
+    const guestTabs = readLocalWorkspace(getWorkspaceScope(null));
+    applyWorkspaceTabs(guestTabs && guestTabs.length > 0 ? guestTabs : createDefaultTabs());
 }
 
-async function loadWorkspaceFromServer(force = false): Promise<void> {
+async function loadWorkspaceFromServer(force = false, prioritizeRemote = false): Promise<void> {
     if (!authToken.value || !isOnline.value) {
         return;
     }
@@ -419,12 +446,30 @@ async function loadWorkspaceFromServer(force = false): Promise<void> {
     syncError.value = null;
 
     try {
+        const scope = getWorkspaceScope(authUser.value);
+        const queuedTabs = readQueuedWorkspace(scope);
         const remoteTabs = await fetchWorkspace(authToken.value);
-        const nextTabs = remoteTabs.length > 0 ? remoteTabs : createDefaultTabs();
 
-        tabs.value = nextTabs;
-        activeTabId.value = nextTabs[0]?.id ?? '';
-        tabVariables.value = Object.fromEntries(nextTabs.map((tab) => [tab.id, {}]));
+        if (prioritizeRemote && remoteTabs.length > 0) {
+            applyWorkspaceTabs(remoteTabs);
+            writeLocalWorkspace(scope, tabs.value);
+            clearQueuedWorkspace(scope);
+            hasLoadedWorkspace.value = true;
+            return;
+        }
+
+        if (queuedTabs && queuedTabs.length > 0) {
+            applyWorkspaceTabs(queuedTabs);
+            await saveWorkspace(authToken.value, queuedTabs);
+            clearQueuedWorkspace(scope);
+        }
+
+        const nextTabs = remoteTabs.length > 0
+            ? remoteTabs
+            : (queuedTabs && queuedTabs.length > 0 ? queuedTabs : tabs.value);
+
+        applyWorkspaceTabs(nextTabs);
+        writeLocalWorkspace(scope, tabs.value);
         hasLoadedWorkspace.value = true;
     } catch (error) {
         syncError.value = error instanceof Error ? error.message : 'Failed loading workspace.';
@@ -433,30 +478,50 @@ async function loadWorkspaceFromServer(force = false): Promise<void> {
     }
 }
 
-function scheduleWorkspaceSave(): void {
-    if (!authToken.value || !isOnline.value || !hasLoadedWorkspace.value) {
+async function persistWorkspaceNow(scope: string): Promise<void> {
+    if (!authToken.value) {
+        return;
+    }
+
+    isSyncing.value = true;
+    syncError.value = null;
+
+    try {
+        await saveWorkspace(authToken.value, tabs.value);
+        clearQueuedWorkspace(scope);
+    } catch (error) {
+        syncError.value = error instanceof Error ? error.message : 'Failed saving workspace.';
+        queueWorkspace(scope, tabs.value);
+    } finally {
+        isSyncing.value = false;
+    }
+}
+
+function scheduleWorkspaceSave(immediate = false): void {
+    const scope = getWorkspaceScope(authUser.value);
+    writeLocalWorkspace(scope, tabs.value);
+
+    if (!authToken.value || !authUser.value) {
+        return;
+    }
+
+    if (!isOnline.value || !hasLoadedWorkspace.value) {
+        queueWorkspace(scope, tabs.value);
         return;
     }
 
     if (saveWorkspaceTimeout.value) {
         clearTimeout(saveWorkspaceTimeout.value);
+        saveWorkspaceTimeout.value = null;
+    }
+
+    if (immediate) {
+        void persistWorkspaceNow(scope);
+        return;
     }
 
     saveWorkspaceTimeout.value = setTimeout(async () => {
-        if (!authToken.value) {
-            return;
-        }
-
-        isSyncing.value = true;
-        syncError.value = null;
-
-        try {
-            await saveWorkspace(authToken.value, tabs.value);
-        } catch (error) {
-            syncError.value = error instanceof Error ? error.message : 'Failed saving workspace.';
-        } finally {
-            isSyncing.value = false;
-        }
+        await persistWorkspaceNow(scope);
     }, 500);
 }
 
@@ -481,11 +546,14 @@ onMounted(() => {
     window.addEventListener('online', updateOnlineStatus);
     window.addEventListener('offline', updateOnlineStatus);
 
+    hydrateLocalWorkspaceForCurrentScope();
+
     if (authToken.value && !authUser.value) {
         me(authToken.value)
             .then((user) => {
                 authUser.value = user;
-                return loadWorkspaceFromServer();
+                hydrateLocalWorkspaceForCurrentScope();
+                return loadWorkspaceFromServer(false, true);
             })
             .catch(() => {
                 clearStoredAuth();
@@ -493,7 +561,8 @@ onMounted(() => {
                 authUser.value = null;
             });
     } else if (isAuthenticated.value) {
-        void loadWorkspaceFromServer();
+        hydrateLocalWorkspaceForCurrentScope();
+        void loadWorkspaceFromServer(false, true);
     }
 });
 
