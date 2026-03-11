@@ -45,6 +45,7 @@ export function buildCommandSuggestions(commands: CommandDefinition[]): string[]
         'list:changeSeparator --separator="," --newSeparator=";" --list=""',
         'list:fromRange --step=1 --start=1 --end=10',
         'list:unique --list=""',
+        'string:replace --text="" --search="" --target=""',
         'help list',
         'help string',
     ]));
@@ -284,10 +285,49 @@ function resolveNestedCommandSubstitution(
 }
 
 function tokenize(source: string): string[] {
-    const matches = source.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+    const tokens: string[] = [];
+    let current = '';
+    let activeQuote: '"' | "'" | '`' | null = null;
 
-    return matches.map((token) => {
-        if ((token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))) {
+    for (const character of source) {
+        if (activeQuote) {
+            current += character;
+
+            if (character === activeQuote) {
+                activeQuote = null;
+            }
+
+            continue;
+        }
+
+        if (character === '"' || character === "'" || character === '`') {
+            activeQuote = character;
+            current += character;
+            continue;
+        }
+
+        if (/\s/.test(character)) {
+            if (current.length > 0) {
+                tokens.push(current);
+                current = '';
+            }
+
+            continue;
+        }
+
+        current += character;
+    }
+
+    if (current.length > 0) {
+        tokens.push(current);
+    }
+
+    return tokens.map((token) => {
+        if (
+            (token.startsWith('"') && token.endsWith('"'))
+            || (token.startsWith("'") && token.endsWith("'"))
+            || (token.startsWith('`') && token.endsWith('`'))
+        ) {
             return token.slice(1, -1);
         }
 
@@ -327,8 +367,9 @@ function stripWrappingQuotes(value: string): string {
 
     const startsWithDouble = value.startsWith('"') && value.endsWith('"');
     const startsWithSingle = value.startsWith("'") && value.endsWith("'");
+    const startsWithBacktick = value.startsWith('`') && value.endsWith('`');
 
-    if (startsWithDouble || startsWithSingle) {
+    if (startsWithDouble || startsWithSingle || startsWithBacktick) {
         return value.slice(1, -1);
     }
 

@@ -1,12 +1,17 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
+import type { CSSProperties } from 'vue';
+
 import CommandInputPanel from '../components/home/CommandInputPanel.vue';
 import HistoryPanel from '../components/home/HistoryPanel.vue';
+import SettingsPanel from '../components/home/SettingsPanel.vue';
 import SyncStatusBadge from '../components/home/SyncStatusBadge.vue';
 import TabsBar from '../components/home/TabsBar.vue';
 import { clearStoredAuth, getStoredToken, getStoredUser, login, logout, me, register } from '../services/auth';
 import { buildCommandSuggestions, executeCommandPrompt, getAvailableCommands } from '../services/commands';
+import { fetchSettings, getDefaultConsoleSettings, normalizeConsoleSettings, saveSettings } from '../services/settings';
+import { getSettingsScope, readLocalSettings, writeLocalSettings } from '../services/settingsOffline';
 import { fetchWorkspace, saveWorkspace } from '../services/workspace';
 import {
     clearQueuedWorkspace,
@@ -18,6 +23,7 @@ import {
 } from '../services/workspaceOffline';
 import type { AuthUser } from '../types/auth';
 import type { ConsoleTab } from '../types/console';
+import type { ConsoleSettings } from '../types/settings';
 
 type HistoryPanelExposed = {
     scrollToBottom: () => void;
@@ -57,6 +63,7 @@ const historyPanelRef = ref<HistoryPanelExposed | null>(null);
 const editingTabId = ref<string | null>(null);
 const editingTabName = ref('');
 const copiedKey = ref<string | null>(null);
+const showSettingsPanel = ref(false);
 const isOnline = ref(navigator.onLine);
 const isSyncing = ref(false);
 const syncPulseTimeout = ref<ReturnType<typeof setTimeout> | null>(null);
@@ -70,7 +77,10 @@ const authPasswordConfirmation = ref('');
 const authError = ref<string | null>(null);
 const authLoading = ref(false);
 const syncError = ref<string | null>(null);
+const consoleSettings = ref<ConsoleSettings>(getDefaultConsoleSettings());
+const hasLoadedSettings = ref(false);
 const hasLoadedWorkspace = ref(false);
+const saveSettingsTimeout = ref<ReturnType<typeof setTimeout> | null>(null);
 const saveWorkspaceTimeout = ref<ReturnType<typeof setTimeout> | null>(null);
 const commandDefinitions = getAvailableCommands();
 const tabVariables = ref<Record<string, Record<string, string>>>({
@@ -80,6 +90,73 @@ const tabVariables = ref<Record<string, Record<string, string>>>({
 const activeTab = computed(() => tabs.value.find((tab) => tab.id === activeTabId.value) ?? tabs.value[0]);
 const activeVariables = computed(() => tabVariables.value[activeTabId.value] ?? {});
 const isAuthenticated = computed(() => authUser.value !== null && authToken.value !== null);
+const shellStyle = computed<CSSProperties>(() => ({
+    '--console-bg': consoleSettings.value.themeBackgroundColor,
+    '--console-panel': shiftHexColor(consoleSettings.value.themeBackgroundColor, 10),
+    '--console-surface': shiftHexColor(consoleSettings.value.themeBackgroundColor, 18),
+    '--console-border': withAlpha(consoleSettings.value.themeFontColor, 0.18),
+    '--console-text': consoleSettings.value.themeFontColor,
+    '--console-muted': withAlpha(consoleSettings.value.themeFontColor, 0.68),
+    backgroundColor: consoleSettings.value.themeBackgroundColor,
+    color: consoleSettings.value.themeFontColor,
+    fontFamily: consoleSettings.value.fontFamily,
+    fontSize: `${consoleSettings.value.fontSize}px`,
+    lineHeight: String(consoleSettings.value.lineHeight),
+}));
+
+function shiftHexColor(hex: string, amount: number): string {
+    const rgb = hexToRgb(hex);
+
+    if (!rgb) {
+        return hex;
+    }
+
+    const next = [rgb.red, rgb.green, rgb.blue].map((value) => Math.max(0, Math.min(255, value + amount)));
+
+    return `#${next.map((value) => value.toString(16).padStart(2, '0')).join('')}`;
+}
+
+function withAlpha(hex: string, alpha: number): string {
+    const rgb = hexToRgb(hex);
+
+    if (!rgb) {
+        return hex;
+    }
+
+    return `rgba(${rgb.red}, ${rgb.green}, ${rgb.blue}, ${alpha})`;
+}
+
+function hexToRgb(hex: string): { red: number; green: number; blue: number } | null {
+    const normalized = hex.replace('#', '');
+
+    if (!/^[0-9A-Fa-f]{6}$/.test(normalized)) {
+        return null;
+    }
+
+    return {
+        red: Number.parseInt(normalized.slice(0, 2), 16),
+        green: Number.parseInt(normalized.slice(2, 4), 16),
+        blue: Number.parseInt(normalized.slice(4, 6), 16),
+    };
+}
+
+function applyConsoleSettings(nextSettings: Partial<ConsoleSettings> | ConsoleSettings): void {
+    const normalized = normalizeConsoleSettings(nextSettings);
+
+    if (areSettingsEqual(consoleSettings.value, normalized)) {
+        return;
+    }
+
+    consoleSettings.value = normalized;
+}
+
+function areSettingsEqual(left: ConsoleSettings, right: ConsoleSettings): boolean {
+    return left.themeBackgroundColor === right.themeBackgroundColor
+        && left.themeFontColor === right.themeFontColor
+        && left.fontFamily === right.fontFamily
+        && left.fontSize === right.fontSize
+        && left.lineHeight === right.lineHeight;
+}
 
 function applyWorkspaceTabs(nextTabs: ConsoleTab[]): void {
     const safeTabs = nextTabs.length > 0 ? nextTabs : createDefaultTabs();
@@ -97,6 +174,10 @@ function hydrateLocalWorkspaceForCurrentScope(): void {
     if (cachedTabs && cachedTabs.length > 0) {
         applyWorkspaceTabs(cachedTabs);
     }
+}
+
+function hydrateLocalSettingsForCurrentScope(): void {
+    applyConsoleSettings(readLocalSettings(getSettingsScope(authUser.value)));
 }
 
 function triggerSyncPulse(duration = 700): void {
@@ -228,6 +309,16 @@ function saveTabRename(tabId: string): void {
 function cancelTabRename(): void {
     editingTabId.value = null;
     editingTabName.value = '';
+}
+
+function resetConsoleSettings(): void {
+    applyConsoleSettings(getDefaultConsoleSettings());
+    scheduleSettingsSave(true);
+}
+
+function handleConsoleSettingsUpdate(nextSettings: ConsoleSettings): void {
+    applyConsoleSettings(nextSettings);
+    scheduleSettingsSave();
 }
 
 function submitCommand(): void {
@@ -410,6 +501,7 @@ async function submitAuth(): Promise<void> {
         authPassword.value = '';
         authPasswordConfirmation.value = '';
 
+        await loadSettingsFromServer(true, true);
         await loadWorkspaceFromServer(true, true);
     } catch (error) {
         authError.value = error instanceof Error ? error.message : 'Authentication failed.';
@@ -427,10 +519,40 @@ async function logoutUser(): Promise<void> {
 
     authToken.value = null;
     authUser.value = null;
+    hasLoadedSettings.value = false;
     hasLoadedWorkspace.value = false;
+    showSettingsPanel.value = false;
 
     const guestTabs = readLocalWorkspace(getWorkspaceScope(null));
     applyWorkspaceTabs(guestTabs && guestTabs.length > 0 ? guestTabs : createDefaultTabs());
+    hydrateLocalSettingsForCurrentScope();
+}
+
+async function loadSettingsFromServer(force = false, prioritizeRemote = false): Promise<void> {
+    if (!authToken.value || !isOnline.value) {
+        return;
+    }
+
+    if (hasLoadedSettings.value && !force) {
+        return;
+    }
+
+    isSyncing.value = true;
+    syncError.value = null;
+
+    try {
+        const scope = getSettingsScope(authUser.value);
+        const remoteSettings = await fetchSettings(authToken.value);
+        const nextSettings = prioritizeRemote ? remoteSettings : normalizeConsoleSettings(remoteSettings);
+
+        applyConsoleSettings(nextSettings);
+        writeLocalSettings(scope, consoleSettings.value);
+        hasLoadedSettings.value = true;
+    } catch (error) {
+        syncError.value = error instanceof Error ? error.message : 'Failed loading settings.';
+    } finally {
+        isSyncing.value = false;
+    }
 }
 
 async function loadWorkspaceFromServer(force = false, prioritizeRemote = false): Promise<void> {
@@ -497,6 +619,27 @@ async function persistWorkspaceNow(scope: string): Promise<void> {
     }
 }
 
+async function persistSettingsNow(scope: string): Promise<void> {
+    if (!authToken.value) {
+        return;
+    }
+
+    isSyncing.value = true;
+    syncError.value = null;
+
+    try {
+        const savedSettings = await saveSettings(authToken.value, consoleSettings.value);
+        applyConsoleSettings(savedSettings);
+        writeLocalSettings(scope, consoleSettings.value);
+        hasLoadedSettings.value = true;
+        triggerSyncPulse(500);
+    } catch (error) {
+        syncError.value = error instanceof Error ? error.message : 'Failed saving settings.';
+    } finally {
+        isSyncing.value = false;
+    }
+}
+
 function scheduleWorkspaceSave(immediate = false): void {
     const scope = getWorkspaceScope(authUser.value);
     writeLocalWorkspace(scope, tabs.value);
@@ -525,6 +668,29 @@ function scheduleWorkspaceSave(immediate = false): void {
     }, 500);
 }
 
+function scheduleSettingsSave(immediate = false): void {
+    const scope = getSettingsScope(authUser.value);
+    writeLocalSettings(scope, consoleSettings.value);
+
+    if (!authToken.value || !authUser.value || !isOnline.value) {
+        return;
+    }
+
+    if (saveSettingsTimeout.value) {
+        clearTimeout(saveSettingsTimeout.value);
+        saveSettingsTimeout.value = null;
+    }
+
+    if (immediate) {
+        void persistSettingsNow(scope);
+        return;
+    }
+
+    saveSettingsTimeout.value = setTimeout(async () => {
+        await persistSettingsNow(scope);
+    }, 400);
+}
+
 watch(activeTabId, () => {
     commandHistoryIndex.value = null;
     commandHistoryDraft.value = '';
@@ -532,6 +698,12 @@ watch(activeTabId, () => {
 
 watch(isOnline, async (online) => {
     if (online && isAuthenticated.value) {
+        if (!hasLoadedSettings.value) {
+            await loadSettingsFromServer();
+        } else {
+            scheduleSettingsSave();
+        }
+
         if (!hasLoadedWorkspace.value) {
             await loadWorkspaceFromServer();
             return;
@@ -547,12 +719,15 @@ onMounted(() => {
     window.addEventListener('offline', updateOnlineStatus);
 
     hydrateLocalWorkspaceForCurrentScope();
+    hydrateLocalSettingsForCurrentScope();
 
     if (authToken.value && !authUser.value) {
         me(authToken.value)
             .then((user) => {
                 authUser.value = user;
                 hydrateLocalWorkspaceForCurrentScope();
+                hydrateLocalSettingsForCurrentScope();
+                void loadSettingsFromServer(false, true);
                 return loadWorkspaceFromServer(false, true);
             })
             .catch(() => {
@@ -562,6 +737,8 @@ onMounted(() => {
             });
     } else if (isAuthenticated.value) {
         hydrateLocalWorkspaceForCurrentScope();
+        hydrateLocalSettingsForCurrentScope();
+        void loadSettingsFromServer(false, true);
         void loadWorkspaceFromServer(false, true);
     }
 });
@@ -579,24 +756,39 @@ onBeforeUnmount(() => {
         clearTimeout(saveWorkspaceTimeout.value);
         saveWorkspaceTimeout.value = null;
     }
+
+    if (saveSettingsTimeout.value) {
+        clearTimeout(saveSettingsTimeout.value);
+        saveSettingsTimeout.value = null;
+    }
 });
 </script>
 
 <template>
-    <main class="h-screen overflow-hidden bg-zinc-950 font-mono text-zinc-100">
+    <main class="h-screen overflow-hidden" :style="shellStyle">
         <div class="mx-auto flex h-full w-full max-w-6xl flex-col overflow-hidden">
-            <header class="border-b border-zinc-800 p-4">
+            <header class="border-b p-4" style="border-color: var(--console-border); background-color: var(--console-panel);">
                 <div class="flex items-center justify-between gap-3">
                     <div>
                         <h1 class="text-base font-semibold text-emerald-400 md:text-lg">PWACommands</h1>
-                        <p class="text-xs text-zinc-400 md:text-sm">Console Workspace</p>
+                        <p class="text-xs md:text-sm" style="color: var(--console-muted);">Console Workspace</p>
                     </div>
                     <div class="flex items-center gap-3">
-                        <div v-if="isAuthenticated" class="text-right text-xs text-zinc-400">
-                            <p class="text-zinc-200">{{ authUser?.name }}</p>
+                        <div v-if="isAuthenticated" class="text-right text-xs" style="color: var(--console-muted);">
+                            <p style="color: var(--console-text);">{{ authUser?.name }}</p>
                             <p>{{ authUser?.email }}</p>
                             <button class="mt-1 text-red-400 hover:text-red-300" @click="logoutUser">Logout</button>
                         </div>
+                        <SettingsPanel
+                            :is-open="showSettingsPanel"
+                            :settings="consoleSettings"
+                            :is-authenticated="isAuthenticated"
+                            :is-online="isOnline"
+                            :is-syncing="isSyncing"
+                            @toggle="showSettingsPanel = !showSettingsPanel"
+                            @reset="resetConsoleSettings"
+                            @update:settings="handleConsoleSettingsUpdate($event)"
+                        />
                         <SyncStatusBadge :is-online="isOnline" :is-syncing="isSyncing" />
                     </div>
                 </div>
@@ -606,26 +798,30 @@ onBeforeUnmount(() => {
                         v-model="authName"
                         type="text"
                         placeholder="Name"
-                        class="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-100 outline-none focus:border-emerald-500"
+                        class="rounded border px-2 py-1 text-xs outline-none focus:border-emerald-500"
+                        style="border-color: var(--console-border); background-color: var(--console-surface); color: var(--console-text);"
                     >
                     <input
                         v-model="authEmail"
                         type="email"
                         placeholder="Email"
-                        class="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-100 outline-none focus:border-emerald-500"
+                        class="rounded border px-2 py-1 text-xs outline-none focus:border-emerald-500"
+                        style="border-color: var(--console-border); background-color: var(--console-surface); color: var(--console-text);"
                     >
                     <input
                         v-model="authPassword"
                         type="password"
                         placeholder="Password"
-                        class="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-100 outline-none focus:border-emerald-500"
+                        class="rounded border px-2 py-1 text-xs outline-none focus:border-emerald-500"
+                        style="border-color: var(--console-border); background-color: var(--console-surface); color: var(--console-text);"
                     >
                     <input
                         v-if="authMode === 'register'"
                         v-model="authPasswordConfirmation"
                         type="password"
                         placeholder="Confirm password"
-                        class="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-100 outline-none focus:border-emerald-500"
+                        class="rounded border px-2 py-1 text-xs outline-none focus:border-emerald-500"
+                        style="border-color: var(--console-border); background-color: var(--console-surface); color: var(--console-text);"
                     >
                     <button
                         type="button"
@@ -637,7 +833,8 @@ onBeforeUnmount(() => {
                     </button>
                     <button
                         type="button"
-                        class="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs text-zinc-300 hover:border-zinc-500"
+                        class="rounded border px-3 py-1 text-xs"
+                        style="border-color: var(--console-border); background-color: var(--console-surface); color: var(--console-text);"
                         @click="authMode = authMode === 'register' ? 'login' : 'register'"
                     >
                         {{ authMode === 'register' ? 'Use Login' : 'Use Register' }}

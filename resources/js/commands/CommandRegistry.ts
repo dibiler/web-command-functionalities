@@ -1,6 +1,7 @@
 import { HelpCommand } from './definitions/HelpCommand';
 import { DateFormatCommand } from './definitions/dateCommands/DateFormatCommand';
 import { ListChangeSeparatorCommand } from './definitions/listCommands/ListChangeSeparatorCommand';
+import { ListCountCommand } from './definitions/listCommands/ListCountCommand';
 import { ListFilterCommand } from './definitions/listCommands/ListFilterCommand';
 import { ListFromRangeCommand } from './definitions/listCommands/ListFromRangeCommand';
 import { ListRandomCommand } from './definitions/listCommands/ListRandomCommand';
@@ -18,6 +19,7 @@ const registry: AbstractCommand[] = [
     new DateFormatCommand(),
     new ListRandomCommand(),
     new ListUniqueCommand(),
+    new ListCountCommand(),
     new ListFilterCommand(),
     new ListFromRangeCommand(),
     new ListSortCommand(),

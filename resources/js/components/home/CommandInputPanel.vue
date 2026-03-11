@@ -23,8 +23,17 @@ function autoResize(): void {
         return;
     }
 
-    commandInputRef.value.style.height = 'auto';
-    commandInputRef.value.style.height = `${commandInputRef.value.scrollHeight}px`;
+    const textarea = commandInputRef.value;
+    textarea.style.height = 'auto';
+
+    const computedStyle = window.getComputedStyle(textarea);
+    const parsedLineHeight = Number.parseFloat(computedStyle.lineHeight);
+    const lineHeight = Number.isFinite(parsedLineHeight) ? parsedLineHeight : 20;
+    const maxHeight = lineHeight * 5;
+
+    const nextHeight = Math.min(textarea.scrollHeight, maxHeight);
+    textarea.style.height = `${nextHeight}px`;
+    textarea.style.overflowY = textarea.scrollHeight > maxHeight ? 'auto' : 'hidden';
 }
 
 function moveCursorToEnd(): void {
@@ -52,23 +61,24 @@ defineExpose({
 </script>
 
 <template>
-    <section class="border-t border-zinc-800 bg-zinc-950/95 p-3 md:p-4">
-        <label class="mb-2 block text-xs text-zinc-400">Command Input</label>
+    <section class="border-t p-3 md:p-4" style="border-color: var(--console-border); background-color: var(--console-panel);">
+        <label class="mb-2 block text-xs" style="color: var(--console-muted);">Command Input</label>
         <textarea
             ref="commandInputRef"
             :value="props.commandInput"
             placeholder='Try: list:unique --list="1,2,2,3"'
-            class="w-full overflow-hidden rounded border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-500"
+            class="w-full resize-none overflow-hidden rounded border px-3 py-2 text-sm outline-none focus:border-emerald-500"
+            style="border-color: var(--console-border); background-color: var(--console-surface); color: var(--console-text);"
             @input="emit('update:commandInput', ($event.target as HTMLTextAreaElement).value)"
             @keydown="emit('keydown-input', $event)"
         />
 
         <div class="mt-3 flex items-center justify-between gap-3">
-            <div class="hidden text-xs text-zinc-500 md:block">
+            <div class="hidden text-xs md:block" style="color: var(--console-muted);">
                 Tab variables:
                 <span
                     v-if="Object.keys(props.activeVariables).length === 0"
-                    class="text-zinc-600"
+                    class="opacity-70"
                 > none </span>
                 <span
                     v-for="variable in Object.keys(props.activeVariables)"
@@ -82,7 +92,7 @@ defineExpose({
                     >
                         {{ props.copiedKey === `var:${variable}` ? 'Copied' : `$${variable}` }}
                     </button>
-                    <span class="pointer-events-none absolute bottom-full left-0 z-10 mb-1 hidden max-w-80 whitespace-pre-wrap wrap-break-workd rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-200 group-hover:block">
+                    <span class="pointer-events-none absolute bottom-full left-0 z-10 mb-1 hidden max-w-80 whitespace-pre-wrap wrap-break-workd rounded border px-2 py-1 text-[10px] group-hover:block" style="border-color: var(--console-border); background-color: var(--console-surface); color: var(--console-text);">
                         {{ props.activeVariables[variable] || '(empty)' }}
                     </span>
                 </span>
@@ -96,14 +106,15 @@ defineExpose({
             </button>
         </div>
 
-        <div class="mt-3 rounded border border-zinc-800 bg-zinc-900/80 p-2">
-            <p class="mb-1 text-xs text-zinc-400">Suggestions</p>
+        <div class="mt-3 rounded border p-2" style="border-color: var(--console-border); background-color: var(--console-surface);">
+            <p class="mb-1 text-xs" style="color: var(--console-muted);">Suggestions</p>
             <div class="flex flex-wrap gap-2">
                 <button
                     v-for="suggestion in props.tabSuggestions"
                     :key="suggestion"
                     type="button"
-                    class="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:border-zinc-500"
+                    class="rounded border px-2 py-1 text-xs"
+                    style="border-color: var(--console-border); background-color: var(--console-panel); color: var(--console-text);"
                     @click="emit('select-suggestion', suggestion)"
                 >
                     {{ suggestion }}
