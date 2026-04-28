@@ -17,8 +17,8 @@ export class DateFormatCommand extends AbstractCommand {
         {
             name: 'date',
             type: 'string',
-            required: true,
-            description: 'Date value to transform.',
+            required: false,
+            description: 'Date value to transform (default: current date).',
             shortAlias: 'd',
             longAlias: 'date',
         },
@@ -63,13 +63,6 @@ export class DateFormatCommand extends AbstractCommand {
         const fromPositional = typeof positionalArgs[0] === 'string' ? positionalArgs[0].trim() : '';
         const dateValue = fromNamed || fromPositional;
 
-        if (!dateValue) {
-            return {
-                ok: false,
-                output: 'Missing required parameter: date.',
-            };
-        }
-
         const inputFormat = typeof input.format === 'string' && input.format.trim().length > 0
             ? input.format.trim()
             : 'Y-m-d';
@@ -86,16 +79,18 @@ export class DateFormatCommand extends AbstractCommand {
             ? input.timezone.trim()
             : undefined;
 
-        const parsedDate = this.parseWithFormat(dateValue, inputFormat);
+        const parsedDate = dateValue
+            ? this.parseWithFormat(dateValue, inputFormat)
+            : new Date();
 
-        if (!parsedDate) {
+        if (dateValue && !parsedDate) {
             return {
                 ok: false,
                 output: `Invalid date "${dateValue}" for format "${inputFormat}".`,
             };
         }
 
-        const formatted = this.formatDate(parsedDate, outputFormat, locale, timezone);
+        const formatted = this.formatDate(parsedDate!, outputFormat, locale, timezone);
 
         if (!formatted.ok) {
             return formatted;
